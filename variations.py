@@ -5,6 +5,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from transformers import DecisionTransformerConfig, DecisionTransformerModel
 from sklearn.model_selection import train_test_split
+from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import argparse
@@ -17,13 +18,18 @@ from finrl.config import INDICATORS
 from finrl.plot import backtest_stats, backtest_plot, get_daily_return, get_baseline
 
 # Global constants
-CONTEXT_LENGTH = 100
+CONTEXT_LENGTH = 20
+NUM_EPOCHS = 500
+LR = 1e-3
+
 TRAIN_START_DATE = '2009-01-01'
 TRAIN_END_DATE = '2018-12-31'
 TRADE_START_DATE = '2019-01-01'
 TRADE_END_DATE = '2020-12-31'
+
 BENCHMARK_TICKER_QQQ = 'QQQ' # Nasdaq 100
 BENCHMARK_TICKER_DOW = 'DIA' # Dow Jones Industrial Average
+
 
 
 def parse_array(s):
@@ -89,7 +95,7 @@ class NoRtgDT(nn.Module):
     """
     A Decision Transformer model that operates WITHOUT the return-to-go signal.
     It still uses the core attention mechanism. This is the correct model
-    for the 'no_rtg' ablation study.
+    for the 'no_rtg' model.
     """
     def __init__(self, config):
         super().__init__()
@@ -172,8 +178,8 @@ class Lstm(nn.Module):
         return {'action_preds': action_preds}
 
 
-def train(epochs=100, lr=1e-2, ablation=None):
-    print(f"--- Starting Training for Ablation: {ablation} ---")
+def train(epochs=100, lr=1e-2, model=None):
+    print(f"--- Starting Training for Model: {model} ---")
     df = pd.read_csv("decision_transformer_ready_dataset.csv")
     df['state'] = df['state'].apply(parse_array)
     df['action'] = df['action'].apply(parse_array)
@@ -209,17 +215,17 @@ def train(epochs=100, lr=1e-2, ablation=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     config = DecisionTransformerConfig(state_dim=state_dim, act_dim=act_dim, hidden_size=128, n_layer=3, n_head=1, n_inner=4*128, max_ep_len=4096)
-    if ablation == "lstm":
+    if model == "lstm":
         model = Lstm(state_dim=state_dim, act_dim=act_dim).to(device)
-    elif ablation == "no_rtg":
+    elif model == "no_rtg":
         model = NoRtgDT(config).to(device)
     else: # Baseline
         model = DecisionTransformerModel(config).to(device)
     
-    from torch.optim.lr_scheduler import StepLR
     loss_fn = nn.MSELoss()
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
+    # scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=10)
     scheduler = StepLR(optimizer, step_size=100, gamma=0.1)
     CLIP_GRAD_NORM = 1.0
 
@@ -259,9 +265,9 @@ def train(epochs=100, lr=1e-2, ablation=None):
             optimizer.step()
             total_loss += loss.item()
 
-        scheduler.step()
         avg_loss = total_loss / len(train_loader)
         train_losses.append(avg_loss)
+        scheduler.step()
 
         model.eval()
         total_val_loss = 0
@@ -293,11 +299,12 @@ def train(epochs=100, lr=1e-2, ablation=None):
 
         avg_val_loss = total_val_loss / len(val_loader)
         val_losses.append(avg_val_loss)
+        # scheduler.step(avg_val_loss)
 
         current_lr = scheduler.get_last_lr()[0]
         print(f"Epoch {epoch + 1}/{epochs}, Avg Train Loss: {avg_loss:.4f}, Avg Val Loss: {avg_val_loss:.4f}, LR: {current_lr:.6f}")
 
-        model_path = f"decision_transformer_{ablation or 'baseline'}.pth"
+        model_path = f"decision_transformer_{model or 'baseline'}.pth"
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             torch.save(model.state_dict(), model_path)
@@ -308,20 +315,20 @@ def train(epochs=100, lr=1e-2, ablation=None):
     plt.figure(figsize=(12, 6))
     plt.plot(train_losses, label='Training Loss')
     plt.plot(val_losses, label='Validation Loss')
-    plt.title(f'Training & Validation Loss (Ablation: {ablation or "Baseline"})')
+    plt.title(f'Training & Validation Loss (Model: {model or "Baseline"})')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.legend()
     plt.grid(True)
-    plt.savefig(f'training_loss_plot_{ablation or "baseline"}.png')
-    print(f"Loss plot saved to training_loss_plot_{ablation or 'baseline'}.png")
+    plt.savefig(f'training_loss_plot_{model or "baseline"}.png')
+    print(f"Loss plot saved to training_loss_plot_{model or 'baseline'}.png")
 
-def run_evaluation_for_model(ablation=None):
+def run_evaluation_for_model(model=None):
     """
-    Runs the evaluation for a single model specified by the ablation type.
+    Runs the evaluation for a single model specified by the model type.
     Returns a dataframe with the account values.
     """
-    print(f"\n--- Running Evaluation for Ablation: {ablation or 'Baseline'} ---")
+    print(f"\n--- Running Evaluation for Model: {model or 'Baseline'} ---")
     
     # Load the offline dataset to determine dimensions and target return
     df = pd.read_csv("decision_transformer_ready_dataset.csv")
@@ -333,7 +340,7 @@ def run_evaluation_for_model(ablation=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load the appropriate model architecture
-    model_path = f"decision_transformer_{ablation or 'baseline'}.pth"
+    model_path = f"decision_transformer_{model or 'baseline'}.pth"
     
     config = DecisionTransformerConfig(
         state_dim=state_dim, act_dim=act_dim, hidden_size=128,
@@ -341,9 +348,9 @@ def run_evaluation_for_model(ablation=None):
     )
 
     # Select the correct model architecture
-    if ablation == "lstm":
+    if model == "lstm":
         model = Lstm(state_dim=state_dim, act_dim=act_dim)
-    elif ablation == "no_rtg":
+    elif model == "no_rtg":
         model = NoRtgDT(config)
     else:  # Baseline
         model = DecisionTransformerModel(config)
@@ -432,9 +439,9 @@ def evaluate_and_plot_all():
     Evaluates all models and plots their performance against benchmarks on a single graph.
     """
     # --- Run evaluations for all models ---
-    df_baseline = run_evaluation_for_model(ablation=None)
-    df_lstm = run_evaluation_for_model(ablation="lstm")
-    df_no_rtg = run_evaluation_for_model(ablation="no_rtg")
+    df_baseline = run_evaluation_for_model(model=None)
+    df_lstm = run_evaluation_for_model(model="lstm")
+    df_no_rtg = run_evaluation_for_model(model="no_rtg")
 
     # --- Combine results for plotting ---
     plot_df = pd.DataFrame()
@@ -522,27 +529,27 @@ def evaluate_and_plot_all():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--ablation', type=str, default=None, choices=['baseline', 'lstm', 'no_rtg', 'all'],
+    parser.add_argument('--model', type=str, default=None, choices=['baseline', 'lstm', 'no_rtg', 'all'],
                         help='Specify which model to train or "all" to train all and plot.')
     args = parser.parse_args()
 
-    if args.ablation == 'all':
+    if args.model == 'all':
         
         print("--- Training All Models ---")
-        train(epochs=300, lr=1e-3, ablation=None)
-        train(epochs=300, lr=1e-3, ablation="lstm")
-        train(epochs=300, lr=1e-3, ablation="no_rtg")
+        train(epochs=NUM_EPOCHS, lr=LR, model=None)
+        train(epochs=NUM_EPOCHS, lr=LR, model="lstm")
+        train(epochs=NUM_EPOCHS, lr=LR, model="no_rtg")
         
         evaluate_and_plot_all()
         
-    elif args.ablation is not None:
+    elif args.model is not None:
         # Train and evaluate a single specified model
-        ablation_type = None if args.ablation == 'baseline' else args.ablation
-        train(epochs=300, lr=1e-3, ablation=ablation_type)
-        run_evaluation_for_model(ablation=ablation_type)
+        model_type = None if args.model == 'baseline' else args.model
+        train(epochs=NUM_EPOCHS, lr=LR, model=model_type)
+        run_evaluation_for_model(model=model_type)
     
     else:
-        print("Please specify an ablation to run or use '--ablation all'")
+        print("Please specify an model to run or use '--model all'")
     
     
-    # example command: python ablation.py --ablation no_rtg
+    # example command: python variations.py --model no_rtg
