@@ -17,7 +17,9 @@ from finrl.plot import backtest_stats, backtest_plot, get_daily_return, get_base
 
 # Global constants
 CONTEXT_LENGTH = 20
-MODEL_PATH = "decision_transformer_finrl.pth"
+TRAIN_EPOCHS = 1000
+TRAIN_LR = 3e-5
+MODEL_PATH = f"decision_transformer_{CONTEXT_LENGTH}_lr_{TRAIN_LR}_epochs_{TRAIN_EPOCHS}.pth"
 TRAIN_START_DATE = '2009-01-01'
 TRAIN_END_DATE = '2018-12-31'
 TRADE_START_DATE = '2019-01-01'
@@ -211,8 +213,6 @@ def train(epochs = 100, lr = 1e-2):
     plt.savefig('training_loss_plot.png')
     print("Loss plot saved to training_loss_plot.png")
 
-# --- Evaluation Function ---
-
 def evaluate():
     print("\n--- Starting Evaluation ---")
     df = pd.read_csv("decision_transformer_ready_dataset.csv")
@@ -222,7 +222,6 @@ def evaluate():
     state_dim = len(df['state'].iloc[0])
     act_dim = len(df['action'].iloc[0])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     config = DecisionTransformerConfig(state_dim=state_dim, act_dim=act_dim, hidden_size=128, n_layer=3, n_head=1, n_inner=4*128)
     model = DecisionTransformerModel(config)
     model.load_state_dict(torch.load(MODEL_PATH))
@@ -383,5 +382,5 @@ def evaluate():
 
 
 if __name__ == '__main__':
-    train(epochs = 1000, lr = 1e-3)
+    train(epochs = TRAIN_EPOCHS, lr = TRAIN_LR)
     evaluate() 
